@@ -1,9 +1,10 @@
 {
-  "name": "shopify-checker-http",
+  "name": "shopify-checker",
   "version": "1.0.0",
-  "description": "API de verificación de Shopify usando solo peticiones HTTP",
+  "description": "API de verificación de Shopify",
   "main": "index.js",
   "scripts": {
+    "postinstall": "npx playwright install chromium",
     "start": "node index.js"
   },
   "dependencies": {
@@ -11,6 +12,7 @@
     "axios": "^1.7.2",
     "https-proxy-agent": "^7.0.5",
     "tough-cookie": "^4.1.4",
-    "axios-cookiejar-support": "^5.0.2"
+    "axios-cookiejar-support": "^5.0.2",
+    "playwright": "^1.45.0"
   }
 }
