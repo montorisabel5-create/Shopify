@@ -1,0 +1,16 @@
+{
+  "name": "shopify-checker-http",
+  "version": "1.0.0",
+  "description": "API de verificación de Shopify usando solo peticiones HTTP",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "axios": "^1.7.2",
+    "https-proxy-agent": "^7.0.5",
+    "tough-cookie": "^4.1.4",
+    "axios-cookiejar-support": "^5.0.2"
+  }
+}
